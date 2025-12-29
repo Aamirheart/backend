@@ -37,24 +37,33 @@ export default class CashfreePaymentProvider extends AbstractPaymentProvider<Opt
     }
   }
 
- // Replace your existing initiatePayment method with this:
+  // --- NEW HELPER: Fixes the 'data.data.data' nesting issue ---
+  private flattenData(data: any): any {
+    if (!data) return {};
+    let clean = data;
+    // Drill down until we find the actual data object containing order_id
+    // This loops through any amount of nesting: data.data.data...
+    while (clean.data && !clean.order_id) {
+      clean = clean.data;
+    }
+    return clean;
+  }
+  // ------------------------------------------------------------
 
-async initiatePayment(context: any): Promise<any> {
+  async initiatePayment(context: any): Promise<any> {
     const { currency_code, amount, resource_id, customer, context: additionalContext } = context
     
-    // 1. Format Amount
-    const orderAmount = (amount / 100).toFixed(2)
+    const validResourceId = resource_id || `sess_${Math.random().toString(36).substring(7)}`
     
-    // 2. Generate a Unique Order ID
-    // Appending timestamp prevents "Order already exists" errors on retry
-    const externalId = `${resource_id}_${Date.now()}` 
+    const orderAmount = (amount / 100).toFixed(2)
+    const externalId = `${validResourceId}_${Date.now()}` 
 
     const payload = {
       order_id: externalId,
       order_amount: parseFloat(orderAmount),
       order_currency: currency_code.toUpperCase(),
       customer_details: {
-        customer_id: customer?.id || "guest_" + resource_id,
+        customer_id: customer?.id || "guest_" + validResourceId,
         customer_phone: customer?.phone || "9999999999",
         customer_email: customer?.email || "test@example.com"
       },
@@ -63,12 +72,8 @@ async initiatePayment(context: any): Promise<any> {
       }
     }
 
-    // DEBUG LOGS
-    console.log("------------------------------------------------")
     console.log("🚀 Initializing Cashfree Payment...")
-    console.log("API Key configured:", !!this.options_.apiKey)
-    console.log("Order ID:", externalId)
-    console.log("------------------------------------------------")
+    console.log(`Payload Order ID: ${externalId}`)
 
     try {
       const response = await axios.post(
@@ -77,31 +82,22 @@ async initiatePayment(context: any): Promise<any> {
         { headers: this.getHeaders() }
       )
       
-      console.log("✅ Cashfree Success! Session ID:", response.data.payment_session_id)
+      console.log("✅ Cashfree Success! Returning Data...")
+      const responseData = {
+        cf_order_id: response.data.cf_order_id,
+        order_id: response.data.order_id,
+        payment_session_id: response.data.payment_session_id,
+        order_status: response.data.order_status,
+        payment_link: response.data.payment_link,
+      }
       
+      // Medusa expects { data: ... } return from initiatePayment
       return {
-        data: {
-          cf_order_id: response.data.cf_order_id,
-          order_id: response.data.order_id,
-          payment_session_id: response.data.payment_session_id,
-          order_status: response.data.order_status,
-          order_amount: response.data.order_amount,
-          payment_link: response.data.payment_link,
-        }
+        data: responseData
       }
     } catch (error: any) {
-      // LOG THE ERROR for debugging
-      console.error("❌ Cashfree Request FAILED")
-      console.error("Status:", error.response?.status)
-      console.error("Message:", error.response?.data?.message || error.message)
-      
-      // CRITICAL FIX: Do NOT throw new Error(). Return the error object instead.
-      // This prevents the 500 Internal Server Error crash.
-      return {
-        error: error.response?.data?.message || error.message,
-        code: "cashfree_init_error",
-        detail: error.response?.data
-      }
+      console.error("❌ Cashfree Init Failed:", error.response?.data?.message || error.message)
+      throw new Error(`Cashfree Init Failed: ${error.response?.data?.message || error.message}`)
     }
   }
 
@@ -109,16 +105,31 @@ async initiatePayment(context: any): Promise<any> {
     paymentSessionData: Record<string, unknown>, 
     context: Record<string, unknown>
   ): Promise<any> {
-    const status = await this.getPaymentStatus(paymentSessionData)
+    // 1. CLEANUP: Fix any existing nesting before processing
+    const flatData = this.flattenData(paymentSessionData);
+    
+    console.log("🔍 Authorize Payment - Clean Data:", JSON.stringify(flatData, null, 2));
+
+    if (!flatData.order_id) {
+      console.error("❌ Fatal: No order_id found in payment session data.");
+      return {
+        status: PaymentSessionStatus.ERROR,
+        data: flatData // Return clean data to prevent further corruption
+      }
+    }
+
+    const status = await this.getPaymentStatus(flatData);
     
     return {
       status: status,
-      data: paymentSessionData
+      data: flatData // Save CLEAN data back to DB
     }
   }
 
   async getPaymentStatus(paymentSessionData: Record<string, unknown>): Promise<any> {
-    const orderId = (paymentSessionData as any).order_id
+    // Ensure we are working with clean data
+    const data = this.flattenData(paymentSessionData);
+    const orderId = data.order_id;
     
     if (!orderId) {
       this.logger_.error("No order_id found in payment session data")
@@ -126,21 +137,44 @@ async initiatePayment(context: any): Promise<any> {
     }
 
     try {
-      const response = await axios.get(
-        `${this.getBaseUrl()}/orders/${orderId}`, 
-        { headers: this.getHeaders() }
-      )
-      
-      const orderStatus = response.data.order_status
-      
-      this.logger_.info(`Cashfree order ${orderId} status: ${orderStatus}`)
-      
+      let orderStatus = "ACTIVE"
+      let attempts = 0
+      const maxAttempts = 5 
+      const delay = 2000 // 2 seconds
+
+      // Polling Loop
+      while (attempts < maxAttempts) {
+        attempts++
+        try {
+            const response = await axios.get(
+              `${this.getBaseUrl()}/orders/${orderId}`, 
+              { headers: this.getHeaders() }
+            )
+            orderStatus = response.data.order_status
+            this.logger_.info(`Poll Attempt ${attempts}/${maxAttempts}: Order ${orderId} is ${orderStatus}`)
+
+            // If terminal state reached, stop polling
+            if (orderStatus === "PAID" || orderStatus === "EXPIRED" || orderStatus === "USER_DROPPED") {
+              break
+            }
+        } catch (e: any) {
+            this.logger_.error(`Poll Request Failed: ${e.message}`)
+        }
+
+        // Wait before next attempt if still ACTIVE
+        if (orderStatus === "ACTIVE" && attempts < maxAttempts) {
+          await new Promise(resolve => setTimeout(resolve, delay))
+        }
+      }
+
       switch (orderStatus) {
         case "PAID":
           return PaymentSessionStatus.AUTHORIZED
         case "ACTIVE":
+          // If still active after 10s, return PENDING. Frontend will handle the retry.
           return PaymentSessionStatus.PENDING
         case "EXPIRED":
+        case "USER_DROPPED":
           return PaymentSessionStatus.CANCELED
         default:
           return PaymentSessionStatus.ERROR
@@ -154,6 +188,14 @@ async initiatePayment(context: any): Promise<any> {
   async updatePayment(context: any): Promise<any> {
     return this.initiatePayment(context)
   }
+  
+  async deletePayment(paymentSessionData: Record<string, unknown>): Promise<any> {
+    return paymentSessionData
+  }
+
+  async retrievePayment(paymentSessionData: Record<string, unknown>): Promise<any> {
+    return paymentSessionData
+  }
 
   async capturePayment(paymentData: Record<string, unknown>): Promise<any> {
     return paymentData
@@ -163,15 +205,12 @@ async initiatePayment(context: any): Promise<any> {
     return paymentData
   }
 
-  async deletePayment(paymentSessionData: Record<string, unknown>): Promise<any> {
-    return paymentSessionData
-  }
-
   async refundPayment(
     paymentData: Record<string, unknown>, 
     refundAmount: number
   ): Promise<any> {
-    const orderId = (paymentData as any).order_id
+    const data = this.flattenData(paymentData);
+    const orderId = data.order_id;
     
     if (!orderId) {
       throw new Error("No order_id found for refund")
@@ -205,16 +244,16 @@ async initiatePayment(context: any): Promise<any> {
     }
   }
 
-  async retrievePayment(paymentSessionData: Record<string, unknown>): Promise<any> {
-    return paymentSessionData
-  }
-
   async getWebhookActionAndData(data: any): Promise<any> {
-    const { rawData, headers } = data.data
-    
-    let webhookBody: any
-    
     try {
+      if (!data || !data.data || !data.data.rawData) {
+        this.logger_.info("⚠️ Cashfree Test/Verification Webhook received. Returning OK.")
+        return { action: "not_supported" }
+      }
+
+      const { rawData } = data.data
+      
+      let webhookBody: any
       if (typeof rawData === "string") {
         webhookBody = JSON.parse(rawData)
       } else if (Buffer.isBuffer(rawData)) {
@@ -223,9 +262,9 @@ async initiatePayment(context: any): Promise<any> {
         webhookBody = rawData
       }
 
-      this.logger_.info(`Cashfree webhook received: ${webhookBody.type}`)
-
       const eventType = webhookBody.type
+      this.logger_.info(`Cashfree webhook received: ${eventType}`)
+
       const orderData = webhookBody.data?.order || {}
 
       switch (eventType) {
@@ -263,7 +302,6 @@ async initiatePayment(context: any): Promise<any> {
           }
 
         default:
-          this.logger_.warn(`Unhandled webhook event: ${eventType}`)
           return {
             action: "not_supported",
             data: webhookBody
@@ -271,7 +309,7 @@ async initiatePayment(context: any): Promise<any> {
       }
     } catch (error: any) {
       this.logger_.error(`Webhook processing error: ${error.message}`)
-      throw new Error(`Webhook processing failed: ${error.message}`)
+      return { action: "not_supported" }
     }
   }
 }

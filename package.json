@@ -30,7 +30,6 @@
     "@medusajs/medusa": "2.12.3",
     "@medusajs/utils": "^2.12.3",
     "axios": "^1.13.2",
-    "cashfree-pg": "^5.1.0",
     "paytmchecksum": "^1.5.1"
   },
   "devDependencies": {

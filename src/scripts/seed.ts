@@ -61,6 +61,7 @@ export default async function seedDemoData({ container }: ExecArgs) {
   const fulfillmentModuleService = container.resolve(Modules.FULFILLMENT);
   const salesChannelModuleService = container.resolve(Modules.SALES_CHANNEL);
   const storeModuleService = container.resolve(Modules.STORE);
+  const regionModuleService = container.resolve(Modules.REGION);
 
   const countries = ["gb", "de", "dk", "se", "fr", "es", "it"];
 
@@ -112,6 +113,9 @@ export default async function seedDemoData({ container }: ExecArgs) {
         {
           currency_code: "usd",
         },
+        {
+          currency_code: "inr",
+        },
       ],
     },
   });
@@ -124,29 +128,76 @@ export default async function seedDemoData({ container }: ExecArgs) {
       },
     },
   });
+  
   logger.info("Seeding region data...");
-  const { result: regionResult } = await createRegionsWorkflow(container).run({
-    input: {
-      regions: [
-        {
-          name: "Europe",
-          currency_code: "eur",
-          countries,
-          payment_providers: ["pp_system_default"],
-        },
-      ],
-    },
-  });
-  const region = regionResult[0];
+  
+  const existingRegions = await regionModuleService.listRegions();
+  const regionsToCreate = [];
+
+  // Check if "Europe" exists
+  let europeRegion = existingRegions.find(r => r.name === "Europe");
+  if (!europeRegion) {
+    regionsToCreate.push({
+      name: "Europe",
+      currency_code: "eur",
+      countries,
+      payment_providers: ["pp_system_default"],
+    });
+  } else {
+    logger.info("Region 'Europe' already exists. Skipping creation.");
+  }
+
+  // Check if "India" exists
+  let indiaRegion = existingRegions.find(r => r.name === "India");
+  if (!indiaRegion) {
+    regionsToCreate.push({
+      name: "India",
+      currency_code: "inr",
+      countries: ["in"],
+      // --- FIX: Changed 'pp_cashfree' to 'cashfree' ---
+      payment_providers: ["cashfree"], 
+    });
+  } else {
+    logger.info("Region 'India' already exists. Skipping creation.");
+  }
+
+  if (regionsToCreate.length > 0) {
+    const { result } = await createRegionsWorkflow(container).run({
+      input: {
+        regions: regionsToCreate,
+      },
+    });
+    // Update local references if we just created them
+    const createdEurope = result.find(r => r.name === "Europe");
+    if (createdEurope) europeRegion = createdEurope;
+    
+    const createdIndia = result.find(r => r.name === "India");
+    if (createdIndia) indiaRegion = createdIndia;
+  }
+  
+  // Use Europe as the default region for subsequent logic if available, or just the first available
+  const region = europeRegion || existingRegions[0] || (indiaRegion as any);
   logger.info("Finished seeding regions.");
 
   logger.info("Seeding tax regions...");
-  await createTaxRegionsWorkflow(container).run({
-    input: countries.map((country_code) => ({
-      country_code,
-      provider_id: "tp_system",
-    })),
-  });
+  try {
+    const taxRegionsToCreate = [
+       ...countries.map((country_code) => ({
+        country_code,
+        provider_id: "tp_system",
+      })),
+      {
+        country_code: "in",
+        provider_id: "tp_system",
+      }
+    ];
+    
+    await createTaxRegionsWorkflow(container).run({
+      input: taxRegionsToCreate,
+    });
+  } catch (e: any) {
+    logger.warn(`Skipping Tax Region creation (likely already exists): ${e.message}`);
+  }
   logger.info("Finished seeding tax regions.");
 
   logger.info("Seeding stock location data...");
@@ -242,6 +293,10 @@ export default async function seedDemoData({ container }: ExecArgs) {
             country_code: "it",
             type: "country",
           },
+          {
+            country_code: "in",
+            type: "country",
+          },
         ],
       },
     ],
@@ -277,6 +332,10 @@ export default async function seedDemoData({ container }: ExecArgs) {
           {
             currency_code: "eur",
             amount: 10,
+          },
+          {
+            currency_code: "inr",
+            amount: 500,
           },
           {
             region_id: region.id,
@@ -315,6 +374,10 @@ export default async function seedDemoData({ container }: ExecArgs) {
           {
             currency_code: "eur",
             amount: 10,
+          },
+          {
+            currency_code: "inr",
+            amount: 1000,
           },
           {
             region_id: region.id,

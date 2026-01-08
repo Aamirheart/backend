@@ -30,7 +30,8 @@
     "@medusajs/medusa": "2.12.3",
     "@medusajs/utils": "^2.12.3",
     "axios": "^1.13.2",
-    "paytmchecksum": "^1.5.1"
+    "paytmchecksum": "^1.5.1",
+    "razorpay": "^2.9.6"
   },
   "devDependencies": {
     "@medusajs/test-utils": "2.12.3",

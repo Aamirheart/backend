@@ -43,6 +43,17 @@ module.exports = defineConfig({
               env: "sandbox", 
             },
           },
+          // --- ADD THIS BLOCK FOR RAZORPAY ---
+          {
+            resolve: "./src/modules/payment-razorpay",
+            id: "razorpay",
+            options: {
+              keyId: process.env.RAZORPAY_KEY_ID,
+              keySecret: process.env.RAZORPAY_KEY_SECRET,
+              webhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET,
+            },
+          },
+          // -----------------------------------
         ],
       },
     },

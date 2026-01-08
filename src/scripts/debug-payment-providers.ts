@@ -1,114 +1,49 @@
-// Save this as: scripts/debug-payment-providers.ts
-// Run with: npx tsx scripts/debug-payment-providers.ts
+// Save this in your BACKEND project at: src/scripts/debug-payments.ts
+// Run with: npx medusa exec ./src/scripts/debug-payments.ts
 
+import { ExecArgs } from "@medusajs/framework/types"
 import { Modules } from "@medusajs/framework/utils"
-import { 
-  initialize as initializeModule 
-} from "@medusajs/framework"
 
-async function debugPaymentProviders() {
-  console.log("🔍 Starting Payment Provider Debug...\n")
+export default async function debugPaymentProviders({ container }: ExecArgs) {
+  const logger = container.resolve("logger")
+  const paymentModuleService = container.resolve(Modules.PAYMENT)
+  const regionModuleService = container.resolve(Modules.REGION)
 
-  // Initialize Medusa
-  const { modules } = await initializeModule({
-    databaseUrl: process.env.DATABASE_URL,
-    redisUrl: process.env.REDIS_URL,
-  })
+  console.log("\n🔍 STARTING PAYMENT DEBUG...\n")
 
-  const paymentModuleService = modules[Modules.PAYMENT]
-  const regionModuleService = modules[Modules.REGION]
+  // 1. List all registered providers
+  const allProviders = await paymentModuleService.listPaymentProviders()
+  console.log(`1️⃣ REGISTERED PROVIDERS (${allProviders.length}):`)
+  allProviders.forEach(p => console.log(`   - ${p.id} (Enabled: ${p.is_enabled})`))
 
+  // 2. Check Specific Region (Replace ID with your actual region ID)
+  // You can find IDs by running: npx medusa exec ./src/scripts/list-regions.ts
+  const regionId = "reg_01KDQJ47CPY4C99CZ2P5PF6YTD" 
+  
   try {
-    // 1. List all registered payment providers
-    console.log("1️⃣ ALL REGISTERED PAYMENT PROVIDERS:")
-    console.log("=" .repeat(50))
-    
-    const allProviders = await paymentModuleService.listPaymentProviders()
-    
-    if (allProviders.length === 0) {
-      console.log("❌ NO PAYMENT PROVIDERS FOUND!")
-      console.log("This means no payment plugins are properly installed.\n")
-    } else {
-      allProviders.forEach((provider: any) => {
-        console.log(`✅ ${provider.id}`)
-        console.log(`   Name: ${provider.name || 'N/A'}`)
-        console.log(`   Is Enabled: ${provider.is_enabled}`)
-        console.log("")
-      })
-    }
-
-    // 2. Check the specific region
-    const regionId = "reg_01KDQJ47CPY4C99CZ2P5PF6YTD"
-    
-    console.log(`2️⃣ REGION DETAILS (${regionId}):`)
-    console.log("=" .repeat(50))
-    
     const region = await regionModuleService.retrieveRegion(regionId, {
       relations: ["payment_providers"]
     })
     
-    console.log(`Region Name: ${region.name}`)
-    console.log(`Currency: ${region.currency_code}`)
-    console.log(`\nPayment Providers Linked to This Region:`)
-    
-    if (!region.payment_providers || region.payment_providers.length === 0) {
-      console.log("❌ NO PAYMENT PROVIDERS LINKED TO THIS REGION!")
-    } else {
-      region.payment_providers.forEach((pp: any) => {
-        console.log(`✅ ${pp.id}`)
-      })
-    }
-    console.log("")
+    console.log(`\n2️⃣ REGION: ${region.name} (${region.currency_code})`)
+    console.log("   Linked Providers:")
+    region.payment_providers?.forEach((pp: any) => {
+      console.log(`   - ${pp.id}`)
+    })
 
-    // 3. Test the Store API endpoint (what frontend calls)
-    console.log("3️⃣ WHAT THE STORE API RETURNS:")
-    console.log("=" .repeat(50))
+    // 3. Simulate Store API Response
+    const storeProviders = await paymentModuleService.listPaymentProviders({
+      region_id: regionId,
+      is_enabled: true
+    })
+    console.log(`\n3️⃣ AVAILABLE IN STOREFRONT (Enabled & Linked):`)
+    storeProviders.forEach(p => console.log(`   ✅ ${p.id}`))
     
-    try {
-      const storeProviders = await paymentModuleService.listPaymentProviders({
-        region_id: regionId,
-        is_enabled: true
-      })
-      
-      console.log(`Found ${storeProviders.length} enabled providers for region:`)
-      storeProviders.forEach((provider: any) => {
-        console.log(`✅ ${provider.id}`)
-      })
-      
-      if (storeProviders.length === 0) {
-        console.log("\n⚠️ WARNING: No providers returned by store API!")
-        console.log("This is what your frontend sees.\n")
-      }
-    } catch (err) {
-      console.error("❌ Error fetching store providers:", err)
-    }
-
-    // 4. Check if Razorpay specifically exists
-    console.log("\n4️⃣ RAZORPAY SPECIFIC CHECK:")
-    console.log("=" .repeat(50))
-    
-    const razorpayIds = [
-      "razorpay-payment",
-      "pp_razorpay_razorpay",
-      "razorpay"
-    ]
-    
-    for (const id of razorpayIds) {
-      try {
-        const provider = await paymentModuleService.retrievePaymentProvider(id)
-        console.log(`✅ FOUND: ${id}`)
-        console.log(`   Is Enabled: ${provider.is_enabled}`)
-        console.log(`   Regions: ${provider.regions?.map((r: any) => r.id).join(", ") || "None"}`)
-      } catch (err) {
-        console.log(`❌ NOT FOUND: ${id}`)
-      }
+    if(storeProviders.length === 0) {
+      logger.warn("⚠️ No payment providers are available for this region in the storefront!")
     }
 
   } catch (error) {
-    console.error("\n❌ ERROR:", error)
-  } finally {
-    process.exit(0)
+    console.log(`\n❌ Region ${regionId} not found or error retrieving it.`)
   }
 }
-
-debugPaymentProviders()

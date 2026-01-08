@@ -37,29 +37,26 @@ export default class CashfreePaymentProvider extends AbstractPaymentProvider<Opt
     }
   }
 
-  // --- NEW HELPER: Fixes the 'data.data.data' nesting issue ---
   private flattenData(data: any): any {
     if (!data) return {};
     let clean = data;
-    // Drill down until we find the actual data object containing order_id
-    // This loops through any amount of nesting: data.data.data...
     while (clean.data && !clean.order_id) {
       clean = clean.data;
     }
     return clean;
   }
-  // ------------------------------------------------------------
 
   async initiatePayment(context: any): Promise<any> {
     const { currency_code, amount, resource_id, customer, context: additionalContext } = context
     
     const validResourceId = resource_id || `sess_${Math.random().toString(36).substring(7)}`
-    
     const orderAmount = (amount / 100).toFixed(2)
-    const externalId = `${validResourceId}_${Date.now()}` 
+    
+    // 🔥 KEY FIX: Use a clean order_id format that Cashfree accepts
+    const cashfreeOrderId = `order_${validResourceId}_${Date.now()}`
 
     const payload = {
-      order_id: externalId,
+      order_id: cashfreeOrderId,
       order_amount: parseFloat(orderAmount),
       order_currency: currency_code.toUpperCase(),
       customer_details: {
@@ -68,12 +65,12 @@ export default class CashfreePaymentProvider extends AbstractPaymentProvider<Opt
         customer_email: customer?.email || "test@example.com"
       },
       order_meta: {
-        return_url: additionalContext?.return_url || `${process.env.STOREFRONT_URL || "http://localhost:8000"}/checkout?step=review&payment_id={order_id}`
+        return_url: additionalContext?.return_url || 
+          `${process.env.STOREFRONT_URL || "http://localhost:8000"}/checkout?step=review&payment_id={order_id}`
       }
     }
 
-    console.log("🚀 Initializing Cashfree Payment...")
-    console.log(`Payload Order ID: ${externalId}`)
+    console.log("🚀 Initializing Cashfree Payment with Order ID:", cashfreeOrderId)
 
     try {
       const response = await axios.post(
@@ -82,21 +79,22 @@ export default class CashfreePaymentProvider extends AbstractPaymentProvider<Opt
         { headers: this.getHeaders() }
       )
       
-      console.log("✅ Cashfree Success! Returning Data...")
+      console.log("✅ Cashfree Response:", JSON.stringify(response.data, null, 2))
+      
+      // 🔥 CRITICAL: Store both IDs - order_id is what SDK needs
       const responseData = {
-        cf_order_id: response.data.cf_order_id,
-        order_id: response.data.order_id,
+        order_id: response.data.order_id,           // This is what SDK expects
+        cf_order_id: response.data.cf_order_id,     // Cashfree's internal ID
         payment_session_id: response.data.payment_session_id,
         order_status: response.data.order_status,
         payment_link: response.data.payment_link,
       }
       
-      // Medusa expects { data: ... } return from initiatePayment
       return {
         data: responseData
       }
     } catch (error: any) {
-      console.error("❌ Cashfree Init Failed:", error.response?.data?.message || error.message)
+      console.error("❌ Cashfree Init Failed:", error.response?.data || error.message)
       throw new Error(`Cashfree Init Failed: ${error.response?.data?.message || error.message}`)
     }
   }
@@ -105,16 +103,15 @@ export default class CashfreePaymentProvider extends AbstractPaymentProvider<Opt
     paymentSessionData: Record<string, unknown>, 
     context: Record<string, unknown>
   ): Promise<any> {
-    // 1. CLEANUP: Fix any existing nesting before processing
     const flatData = this.flattenData(paymentSessionData);
     
-    console.log("🔍 Authorize Payment - Clean Data:", JSON.stringify(flatData, null, 2));
+    console.log("🔍 Authorize Payment - Data:", JSON.stringify(flatData, null, 2));
 
     if (!flatData.order_id) {
-      console.error("❌ Fatal: No order_id found in payment session data.");
+      console.error("❌ No order_id found in payment session data.");
       return {
         status: PaymentSessionStatus.ERROR,
-        data: flatData // Return clean data to prevent further corruption
+        data: flatData
       }
     }
 
@@ -122,12 +119,11 @@ export default class CashfreePaymentProvider extends AbstractPaymentProvider<Opt
     
     return {
       status: status,
-      data: flatData // Save CLEAN data back to DB
+      data: flatData
     }
   }
 
   async getPaymentStatus(paymentSessionData: Record<string, unknown>): Promise<any> {
-    // Ensure we are working with clean data
     const data = this.flattenData(paymentSessionData);
     const orderId = data.order_id;
     
@@ -140,9 +136,8 @@ export default class CashfreePaymentProvider extends AbstractPaymentProvider<Opt
       let orderStatus = "ACTIVE"
       let attempts = 0
       const maxAttempts = 5 
-      const delay = 2000 // 2 seconds
+      const delay = 2000
 
-      // Polling Loop
       while (attempts < maxAttempts) {
         attempts++
         try {
@@ -151,17 +146,15 @@ export default class CashfreePaymentProvider extends AbstractPaymentProvider<Opt
               { headers: this.getHeaders() }
             )
             orderStatus = response.data.order_status
-            this.logger_.info(`Poll Attempt ${attempts}/${maxAttempts}: Order ${orderId} is ${orderStatus}`)
+            this.logger_.info(`Poll ${attempts}/${maxAttempts}: Order ${orderId} is ${orderStatus}`)
 
-            // If terminal state reached, stop polling
             if (orderStatus === "PAID" || orderStatus === "EXPIRED" || orderStatus === "USER_DROPPED") {
               break
             }
         } catch (e: any) {
-            this.logger_.error(`Poll Request Failed: ${e.message}`)
+            this.logger_.error(`Poll Failed: ${e.message}`)
         }
 
-        // Wait before next attempt if still ACTIVE
         if (orderStatus === "ACTIVE" && attempts < maxAttempts) {
           await new Promise(resolve => setTimeout(resolve, delay))
         }
@@ -171,7 +164,6 @@ export default class CashfreePaymentProvider extends AbstractPaymentProvider<Opt
         case "PAID":
           return PaymentSessionStatus.AUTHORIZED
         case "ACTIVE":
-          // If still active after 10s, return PENDING. Frontend will handle the retry.
           return PaymentSessionStatus.PENDING
         case "EXPIRED":
         case "USER_DROPPED":
@@ -231,7 +223,7 @@ export default class CashfreePaymentProvider extends AbstractPaymentProvider<Opt
         { headers: this.getHeaders() }
       )
 
-      this.logger_.info(`Refund initiated for order ${orderId}: ${response.data.cf_refund_id}`)
+      this.logger_.info(`Refund initiated: ${response.data.cf_refund_id}`)
 
       return {
         cf_refund_id: response.data.cf_refund_id,
@@ -247,7 +239,7 @@ export default class CashfreePaymentProvider extends AbstractPaymentProvider<Opt
   async getWebhookActionAndData(data: any): Promise<any> {
     try {
       if (!data || !data.data || !data.data.rawData) {
-        this.logger_.info("⚠️ Cashfree Test/Verification Webhook received. Returning OK.")
+        this.logger_.info("⚠️ Cashfree Test Webhook")
         return { action: "not_supported" }
       }
 
@@ -263,7 +255,7 @@ export default class CashfreePaymentProvider extends AbstractPaymentProvider<Opt
       }
 
       const eventType = webhookBody.type
-      this.logger_.info(`Cashfree webhook received: ${eventType}`)
+      this.logger_.info(`Cashfree webhook: ${eventType}`)
 
       const orderData = webhookBody.data?.order || {}
 
@@ -308,7 +300,7 @@ export default class CashfreePaymentProvider extends AbstractPaymentProvider<Opt
           }
       }
     } catch (error: any) {
-      this.logger_.error(`Webhook processing error: ${error.message}`)
+      this.logger_.error(`Webhook error: ${error.message}`)
       return { action: "not_supported" }
     }
   }

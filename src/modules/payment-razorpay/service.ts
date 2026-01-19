@@ -29,7 +29,7 @@ export default class RazorpayPaymentProvider extends AbstractPaymentProvider<Opt
     })
   }
 
-  async initiatePayment(context: any): Promise<any> {
+async initiatePayment(context: any): Promise<any> {
     const { currency_code, amount, resource_id, customer } = context
     
     const orderData = {
@@ -46,18 +46,22 @@ export default class RazorpayPaymentProvider extends AbstractPaymentProvider<Opt
       const order = await this.razorpay_.orders.create(orderData)
       
       return {
-        id: order.id, 
-        amount: order.amount,
-        currency: order.currency,
-        notes: order.notes,
-        status: "created"
+        // 1. WRAP everything else inside 'data'
+        data: {
+          id: order.id, 
+          amount: order.amount,
+          currency: order.currency,
+          notes: order.notes,
+        },
+        // 2. Set status to PENDING (do not use "created")
+        status: PaymentSessionStatus.PENDING
       }
     } catch (error: any) {
       this.logger_.error(`Razorpay Order Creation Failed: ${error.message}`)
       throw new Error(`Razorpay Order Creation Failed: ${error.message}`)
     }
   }
-
+  
   async authorizePayment(
     paymentSessionData: Record<string, unknown>, 
     context: Record<string, unknown>

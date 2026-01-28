@@ -108,9 +108,11 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     const productModuleService = req.scope.resolve(Modules.PRODUCT);
     const salesChannelService = req.scope.resolve(Modules.SALES_CHANNEL);
 
-    // 2. Fetch Default Sales Channel (CORRECTED)
-    // We pass {} as filters, and { take: 1 } as config
-    const salesChannels = await salesChannelService.list({}, { take: 1 });
+    // 2. Fetch Default Sales Channel (FIXED)
+    // The method is listSalesChannels. 
+    // Argument 1: Filters (Empty object {})
+    // Argument 2: Config ({ take: 1 })
+    const salesChannels = await salesChannelService.listSalesChannels({}, { take: 1 });
     const defaultSalesChannel = salesChannels[0];
 
     if (!defaultSalesChannel) {
@@ -144,7 +146,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     // 6. Create Cart with Sales Channel ID
     const cart = await cartModuleService.createCarts({
       region_id: region.id,
-      sales_channel_id: defaultSalesChannel.id, // <--- Explicitly assigning channel
+      sales_channel_id: defaultSalesChannel.id, // Explicitly assigning channel
       currency_code: region.currency_code,
       email: metadata?.email, 
       items: [
